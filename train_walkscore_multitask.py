@@ -67,6 +67,49 @@ STUDY_IDS = {
     'beautiful' : '5217c351ad93a7d3e7b07a64'
 }
 
+transform = T.Compose([
+    T.ToPILImage(),
+    T.Lambda(lambda im: im.crop((0, 0, im.width, im.height-25))),  # strip bar
+    T.Resize(256, interpolation=3),
+    T.CenterCrop(224),
+    T.ToTensor(),                                                  # [0-1]
+    T.Normalize(mean=[0.485, 0.456, 0.406],                        # ImageNet
+                std =[0.229, 0.224, 0.225])
+])
+
+class WalkDataset(Dataset):
+    def __init__(self, loc_ids, wide_norm):
+        self.loc_ids = list(loc_ids)
+        self.wide_norm = wide_norm
+    def __len__(self): return len(self.loc_ids)
+    def __getitem__(self, idx):
+        loc = self.loc_ids[idx]
+        img = io.imread(os.path.join(IMG_DIR, f'{loc}.jpg'))
+        img = transform(img)
+        y   = torch.tensor(self.wide_norm.loc[loc, HEADS].values,
+                           dtype=torch.float32)
+        return img, y
+
+class VGGMulti(nn.Module):
+    def __init__(self, heads):
+        super().__init__()
+        base = models.vgg16(weights='DEFAULT')
+        self.features = base.features
+        self.avgpool  = base.avgpool
+        self.flatten  = nn.Flatten()
+        dim = 512 * 7 * 7
+        self.heads = nn.ModuleDict({
+            h: nn.Sequential(
+                nn.Linear(dim, 256), nn.ReLU(inplace=True),
+                nn.Linear(256, 1)
+            ) for h in heads
+        })
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = self.flatten(x)
+        return torch.cat([self.heads[h](x) for h in HEADS], dim=1)
+
 if __name__ == '__main__':
     print('Reading qscores.tsv …')
     qdf = pd.read_csv(QSCORES_TSV_PATH, sep='\t')
@@ -92,55 +135,10 @@ if __name__ == '__main__':
     # ----------------------------------------------------#
     # 3.  Torch dataset                                   #
     # ----------------------------------------------------#
-    transform = T.Compose([
-        T.ToPILImage(),
-        T.Lambda(lambda im: im.crop((0, 0, im.width, im.height-25))),  # strip bar
-        T.Resize(256, interpolation=3),
-        T.CenterCrop(224),
-        T.ToTensor(),                                                  # [0-1]
-        T.Normalize(mean=[0.485, 0.456, 0.406],                        # ImageNet
-                    std =[0.229, 0.224, 0.225])
-    ])
-
-    class WalkDataset(Dataset):
-        def __init__(self, loc_ids):
-            self.loc_ids = list(loc_ids)
-        def __len__(self): return len(self.loc_ids)
-        def __getitem__(self, idx):
-            loc = self.loc_ids[idx]
-            img = io.imread(os.path.join(IMG_DIR, f'{loc}.jpg'))
-            img = transform(img)
-            y   = torch.tensor(wide_norm.loc[loc, HEADS].values,
-                               dtype=torch.float32)
-            return img, y
-
-    train_loader = DataLoader(WalkDataset(train_ids), BATCH_SIZE,
+    train_loader = DataLoader(WalkDataset(train_ids, wide_norm), BATCH_SIZE,
                               shuffle=True,  num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(WalkDataset(val_ids),   BATCH_SIZE,
+    val_loader   = DataLoader(WalkDataset(val_ids, wide_norm),   BATCH_SIZE,
                               shuffle=False, num_workers=4, pin_memory=True)
-
-    # ----------------------------------------------------#
-    # 4.  VGG-16 multi-head model                         #
-    # ----------------------------------------------------#
-    class VGGMulti(nn.Module):
-        def __init__(self, heads):
-            super().__init__()
-            base = models.vgg16(weights='DEFAULT')
-            self.features = base.features
-            self.avgpool  = base.avgpool
-            self.flatten  = nn.Flatten()
-            dim = 512 * 7 * 7
-            self.heads = nn.ModuleDict({
-                h: nn.Sequential(
-                    nn.Linear(dim, 256), nn.ReLU(inplace=True),
-                    nn.Linear(256, 1)
-                ) for h in heads
-            })
-        def forward(self, x):
-            x = self.features(x)
-            x = self.avgpool(x)
-            x = self.flatten(x)
-            return torch.cat([self.heads[h](x) for h in HEADS], dim=1)
 
     model     = VGGMulti(HEADS).to(DEVICE)
     criterion = nn.MSELoss()
